@@ -123,6 +123,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Log registered routes to help debug missing endpoints
+def _log_routes():
+    try:
+        logger.info("Registered FastAPI routes:")
+        for r in app.routes:
+            try:
+                methods = getattr(r, 'methods', None)
+                path = getattr(r, 'path', getattr(r, 'url', ''))
+                logger.info(f"  {methods} {path} (name={r.name})")
+            except Exception:
+                logger.info(f"  {r}")
+    except Exception as e:
+        logger.warning(f"Could not log routes: {e}")
+
+# Call once at import time to show current route registration
+_log_routes()
+
 
 # --- Connection Management ---
 async def ensure_mcp_connected():
@@ -375,76 +392,92 @@ async def get_table_schema_endpoint(database: str, table: str):
 @app.post("/api/copilotkit")
 async def copilotkit_chat(request: CopilotChatRequest):
     """
-    Main chat endpoint for CopilotKit frontend. Accepts a user message, sends it to OpenAI, parses tool calls, executes tools via MCP, and streams results.
+    Main chat endpoint for CopilotKit frontend. Supports Azure OpenAI deployments and OpenAI public API.
+    Streams LLM output and routes tool calls to the MCP engine.
     """
-    # 1. Send user message to OpenAI
-    openai_api_key = settings.openai_api_key or os.environ.get("OPENAI_API_KEY")
-    openai_model = settings.openai_model or "gpt-4-turbo"
-    if not openai_api_key:
-        raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
-
     user_message = request.message
     session_id = request.session_id or "default"
     context = request.context or {}
 
-    # Compose OpenAI API payload (ChatCompletion)
-    openai_url = "https://api.openai.com/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {openai_api_key}"}
+    # Base payload
     payload = {
-        "model": openai_model,
         "messages": [
             {"role": "system", "content": "You are a helpful SQL assistant. Use tool calls for database actions."},
             {"role": "user", "content": user_message}
         ],
         "stream": True,
-        "tools": [
-            {
-                "type": "function",
-                "function": {
-                    "name": "execute_sql_query",
-                    "description": "Execute SQL query on the connected database.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string", "description": "SQL query to execute."}
-                        },
-                        "required": ["query"]
-                    }
-                }
-            }
-        ]
     }
 
+    # Keep previous tools/functions metadata (optional)
+    payload["tools"] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "execute_sql_query",
+                "description": "Execute SQL query on the connected database.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"]
+                }
+            }
+        }
+    ]
+
+    # Choose provider: Azure if configured, otherwise OpenAI
+    if getattr(settings, "azure_openai_api_key", ""):
+        if not (settings.azure_openai_endpoint and settings.azure_openai_deployment and settings.azure_openai_api_version):
+            raise HTTPException(status_code=500, detail="Azure OpenAI config incomplete")
+
+        llm_url = f"{settings.azure_openai_endpoint.rstrip('/')}/openai/deployments/{settings.azure_openai_deployment}/chat/completions?api-version={settings.azure_openai_api_version}"
+        headers = {"api-key": settings.azure_openai_api_key, "Content-Type": "application/json"}
+        send_payload = payload
+    else:
+        if not settings.openai_api_key:
+            raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
+        llm_url = "https://api.openai.com/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {settings.openai_api_key}", "Content-Type": "application/json"}
+        send_payload = {**payload, "model": settings.openai_model}
+
     async def chat_stream():
-        # 2. Stream OpenAI response
         async with httpx.AsyncClient(timeout=60.0) as client:
-            async with client.stream("POST", openai_url, headers=headers, json=payload) as resp:
+            async with client.stream("POST", llm_url, headers=headers, json=send_payload) as resp:
                 async for line in resp.aiter_lines():
-                    if not line or not line.startswith("data: "):
+                    if not line:
                         continue
-                    data = line[6:]
+
+                    # support 'data: ' prefix
+                    if line.startswith("data: "):
+                        data = line[6:]
+                    else:
+                        data = line
+
                     if data.strip() == "[DONE]":
                         break
-                    # Parse OpenAI response chunk
+
                     try:
                         chunk = json.loads(data)
                     except Exception:
                         continue
-                    # If tool call is present, execute tool via MCP
+
                     choices = chunk.get("choices", [])
                     for choice in choices:
-                        if "delta" in choice and "tool_calls" in choice["delta"]:
-                            tool_calls = choice["delta"]["tool_calls"]
-                            for tool_call in tool_calls:
+                        delta = choice.get("delta", {})
+                        # handle tool calls
+                        if "tool_calls" in delta:
+                            for tool_call in delta["tool_calls"]:
                                 tool_name = tool_call["function"]["name"]
                                 tool_args = tool_call["function"].get("arguments", {})
-                                # Call MCP tool and stream result
                                 mcp_client = await get_mcp_client()
                                 async for event in mcp_client.call_tool_streaming(tool_name, tool_args):
                                     yield event
-                        elif "delta" in choice and "content" in choice["delta"]:
-                            # Stream normal LLM content
-                            yield f"data: {json.dumps({'type': 'llm_content', 'content': choice['delta']['content']})}\n\n"
+                        elif "content" in delta:
+                            yield f"data: {json.dumps({'type': 'llm_content', 'content': delta['content']})}\n\n"
+                        else:
+                            # fallback: stream text/message content
+                            text = choice.get("text") or (choice.get("message") or {}).get("content")
+                            if text:
+                                yield f"data: {json.dumps({'type': 'llm_content', 'content': text})}\n\n"
 
     return StreamingResponse(chat_stream(), media_type="text/event-stream")
 

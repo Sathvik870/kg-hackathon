@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str = ""
     openai_model: str = "gpt-4-turbo"
+    # Azure OpenAI (deployment-based)
+    azure_openai_api_key: str = ""
+    azure_openai_endpoint: str = ""
+    azure_openai_deployment: str = ""
+    azure_openai_api_version: str = "2024-12-01-preview"
     
     # FastAPI
     fastapi_host: str = "0.0.0.0"
@@ -30,6 +35,9 @@ class Settings(BaseSettings):
     
     # Logging
     log_level: str = "INFO"
+    
+    # MCP server
+    mcp_server_url: str = "http://localhost:8001"
     
     class Config:
         env_file = ".env"
