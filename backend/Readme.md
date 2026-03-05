@@ -5,3 +5,5 @@ then : to activate virtual env : "venv\Scripts\Activate.ps1" for windows ps , fo
 to upgrade pip in both os : "python -m pip install --upgrade pip"
 
 to install all the requirements in both os :   "pip install -r requirements.txt"
+
+to run the file : 
