@@ -1,0 +1,63 @@
+**pycache**/
+*.py[cod]
+*$py.class
+
+
+venv/
+env/
+ENV/
+.venv/
+
+
+.env
+.env.*
+
+
+build/
+dist/
+*.egg-info/
+.eggs/
+
+
+*.log
+
+
+.ipynb_checkpoints/
+
+# ---- IDE files ----
+
+.vscode/
+.idea/
+
+# ---- OS files ----
+
+.DS_Store
+Thumbs.db
+
+# ---- Model files (optional if large) ----
+
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.pth
+
+# ---- Streamlit cache ----
+
+.streamlit/secrets.toml
+
+# ---- Database files ----
+
+*.sqlite3
+*.db
+
+# ---- Coverage / testing ----
+
+.coverage
+htmlcov/
+.pytest_cache/
+
+# ---- Temporary files ----
+
+tmp/
+temp/
